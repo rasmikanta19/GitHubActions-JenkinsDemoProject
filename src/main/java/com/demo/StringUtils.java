@@ -71,4 +71,7 @@ public class StringUtils {
         }
         return result.toString();
     }
+    public String concatStrings(String first, String second) {
+        return first + second;
+    }
 }

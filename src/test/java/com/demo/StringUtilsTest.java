@@ -136,4 +136,8 @@ class StringUtilsTest {
     void testToTitleCaseEmpty() {
         assertEquals("", stringUtils.toTitleCase(""));
     }
+
+    @Test
+    @DisplayName("Concat 2 Strings")
+    void testConcat2Strings() {assertEquals("JaiJagannath",stringUtils.concatStrings("Jai","Jagannath"));}
 }
