@@ -1,0 +1,69 @@
+# ============================================================
+# GitHub Actions CI Workflow
+# ============================================================
+# This file defines the CI pipeline for GitHub Actions.
+#
+# Key difference from Jenkins:
+#   - No dedicated CI server is required; GitHub hosts and
+#     runs the workers (called "runners") automatically.
+#   - The pipeline is triggered by GitHub events (push, PR)
+#     and is configured entirely inside this YAML file stored
+#     in the repository.
+# ============================================================
+
+name: CI Pipeline
+
+# Trigger the workflow on every push to any branch and on
+# every pull-request targeting the main branch.
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+    branches:
+      - main
+
+# Restrict the GITHUB_TOKEN to the minimum permissions needed.
+# This job only reads source code and uploads artefacts.
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    # GitHub-hosted runner – no server setup needed!
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Check out the source code
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      # 2. Set up Java 11 (Temurin distribution)
+      - name: Set up JDK 11
+        uses: actions/setup-java@v4
+        with:
+          java-version: "11"
+          distribution: "temurin"
+          # Cache Maven dependencies to speed up subsequent runs
+          cache: maven
+
+      # 3. Compile the project
+      - name: Compile
+        run: mvn compile
+
+      # 4. Run all unit tests
+      - name: Run unit tests
+        run: mvn test
+
+      # 5. Package the application into a JAR
+      - name: Package
+        run: mvn package -DskipTests
+
+      # 6. Upload the JAR as a build artifact so it can be
+      #    downloaded from the workflow run summary page.
+      - name: Upload JAR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-jar
+          path: target/*.jar
+          retention-days: 7
