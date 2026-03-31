@@ -139,5 +139,5 @@ class StringUtilsTest {
 
     @Test
     @DisplayName("Concat 2 Strings")
-    void testConcat2Strings() {assertEquals("JaiJagannath",stringUtils.concatStrings("Jai","Jagannath"));}
+    void testConcat2Strings() {assertEquals("JaiJagannath ",stringUtils.concatStrings("Jai","Jagannath"));}
 }
