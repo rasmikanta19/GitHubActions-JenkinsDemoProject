@@ -133,11 +133,22 @@ jobs:
         with:
           fetch-depth: 0    # ← CRITICAL for SonarCloud
 
-      # ── Step 2: Set up Java ───────────────────────────────
-      - name: Set up JDK 11
+      # ── Step 2: Set up Java 17 ───────────────────────────
+      # WHY JAVA 17 here (not 11)?
+      # The SonarCloud scanner (sonar-scanner-api bundled inside
+      # sonar-maven-plugin) is compiled with Java 17 (class file
+      # version 61.0). Running it under Java 11 (max class file
+      # version 55.0) causes:
+      #   UnsupportedClassVersionError: class file version 61.0
+      # Java 17 is fully backward-compatible: the application
+      # source code still compiles to Java 11 bytecode because
+      # maven.compiler.source/target = 11 in pom.xml.
+      # Job 1 (build-and-test) stays on Java 11 to validate
+      # real Java 11 compatibility of the application code.
+      - name: Set up JDK 17 (required by SonarCloud scanner)
         uses: actions/setup-java@v4
         with:
-          java-version: "11"
+          java-version: "17"
           distribution: "temurin"
           cache: maven      # restores ~/.m2 from cache
 
