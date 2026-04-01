@@ -66,10 +66,15 @@
             </plugin>
 
 
+                <!-- sonar-maven-plugin 3.9.1.2184 is the last version
+                     that supports Java 11. Version 4.x requires Java 17+.
+                     Error if using 4.x on Java 11:
+                       UnsupportedClassVersionError: class file version 61.0
+                       (Java 17) vs 55.0 (Java 11)                          -->
                 <plugin>
                     <groupId>org.sonarsource.scanner.maven</groupId>
                     <artifactId>sonar-maven-plugin</artifactId>
-                    <version>4.0.0.4121</version>
+                    <version>3.9.1.2184</version>
                 </plugin>
 
 
