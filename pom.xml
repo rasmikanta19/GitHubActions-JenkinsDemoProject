@@ -23,6 +23,23 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <junit.version>5.10.2</junit.version>
         <maven-surefire.version>3.2.5</maven-surefire.version>
+
+        <!-- ══════════════════════════════════════════════════════════
+             SONARCLOUD PROPERTIES
+             These tell the Sonar Maven plugin WHERE to upload results.
+             sonar.organization  = your GitHub/SonarCloud org key
+             sonar.projectKey    = unique key created on sonarcloud.io
+             sonar.host.url      = SonarCloud endpoint (not localhost)
+             ══════════════════════════════════════════════════════════ -->
+        <sonar.organization>rasmikanta19</sonar.organization>
+        <sonar.projectKey>rasmikanta19_GitHubActions-JenkinsDemoProject</sonar.projectKey>
+        <sonar.host.url>https://sonarcloud.io</sonar.host.url>
+
+        <!-- Tell SonarCloud WHERE to find the JaCoCo XML coverage report.
+             JaCoCo generates this file during the `verify` phase.        -->
+        <sonar.coverage.jacoco.xmlReportPaths>
+            ${project.build.directory}/site/jacoco/jacoco.xml
+        </sonar.coverage.jacoco.xmlReportPaths>
     </properties>
 
     <dependencies>
@@ -54,6 +71,51 @@
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>${maven-surefire.version}</version>
             </plugin>
+
+            <!-- ══════════════════════════════════════════════════════════
+                 JACOCO PLUGIN  (Java Code Coverage)
+                 ══════════════════════════════════════════════════════════
+                 JaCoCo instruments your bytecode silently while tests run.
+                 It produces two outputs:
+                   1. jacoco.exec        — binary data (used internally)
+                   2. site/jacoco/*.xml  — XML report read by SonarCloud
+                   3. site/jacoco/index.html — human-readable HTML report
+
+                 HOW IT WORKS IN THE PIPELINE:
+                   mvn verify
+                     → prepare-agent  (JaCoCo hooks into the JVM)
+                     → tests run      (every line hit is recorded)
+                     → report goal    (XML + HTML generated)
+                   then sonar:sonar reads the XML and uploads to SonarCloud
+                 ══════════════════════════════════════════════════════════ -->
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <version>0.8.11</version>
+                <executions>
+                    <!-- Phase: initialize
+                         Attaches the JaCoCo Java agent so it can watch
+                         which lines are executed during the test phase.  -->
+                    <execution>
+                        <id>prepare-agent</id>
+                        <goals>
+                            <goal>prepare-agent</goal>
+                        </goals>
+                    </execution>
+                    <!-- Phase: verify (runs AFTER test phase)
+                         Reads the jacoco.exec binary and generates:
+                           - XML  → consumed by SonarCloud
+                           - HTML → human-readable, uploaded as artifact  -->
+                    <execution>
+                        <id>report</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>report</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+
         </plugins>
     </build>
 

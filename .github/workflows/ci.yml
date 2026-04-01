@@ -1,20 +1,46 @@
 # ============================================================
-# GitHub Actions CI Workflow
+# GitHub Actions CI/CD Pipeline  +  SonarCloud Code Quality
 # ============================================================
-# This file defines the CI pipeline for GitHub Actions.
+# WHAT CHANGED FROM THE ORIGINAL:
+#   1. fetch-depth: 0   → full git history needed by SonarCloud
+#   2. Sonar cache step → avoids re-downloading scanner rules
+#   3. `mvn verify sonar:sonar` replaces `mvn test`
+#        verify  = compile + test + JaCoCo coverage report
+#        sonar:sonar = uploads results to sonarcloud.io
+#   4. New step: upload JaCoCo HTML report as artifact
+#   5. New permissions block: pull-requests: write
+#        (so Sonar can post Quality Gate comments on PRs)
 #
-# Key difference from Jenkins:
-#   - No dedicated CI server is required; GitHub hosts and
-#     runs the workers (called "runners") automatically.
-#   - The pipeline is triggered by GitHub events (push, PR)
-#     and is configured entirely inside this YAML file stored
-#     in the repository.
+# HOW SONARCLOUD FITS IN THE PIPELINE:
+#
+#   Push code
+#      │
+#      ▼
+#   Checkout (full history)
+#      │
+#      ▼
+#   Setup Java + restore caches (Maven + Sonar)
+#      │
+#      ▼
+#   mvn compile
+#      │
+#      ▼
+#   mvn verify  ←── JaCoCo agent hooks into JVM
+#      │              Tests run → coverage recorded
+#      │              JaCoCo generates jacoco.xml
+#      ▼
+#   sonar:sonar ←── Scanner reads:
+#      │              - your source code (bugs, smells)
+#      │              - jacoco.xml       (coverage %)
+#      │              Uploads everything to sonarcloud.io
+#      ▼
+#   Quality Gate result appears in:
+#      - GitHub PR Checks tab (pass ✅ / fail ❌)
+#      - sonarcloud.io dashboard (full report)
 # ============================================================
 
-name: CI/CD Pipeline
+name: CI/CD Pipeline with SonarCloud
 
-# Trigger the workflow on every push to any branch and on
-# every pull-request targeting the main branch.
 on:
   push:
     branches:
@@ -23,47 +49,155 @@ on:
     branches:
       - main
 
-# Restrict the GITHUB_TOKEN to the minimum permissions needed.
-# This job only reads source code and uploads artefacts.
+# contents: read       → checkout source code
+# pull-requests: write → SonarCloud posts Quality Gate result
+#                        as a comment on pull requests
 permissions:
   contents: read
+  pull-requests: write
 
 jobs:
+  # ─────────────────────────────────────────────────────────
+  # JOB 1 — Build & Test
+  # Purpose: Compile the code and run unit tests fast.
+  #          This is the first gate — fail fast, fail cheap.
+  # ─────────────────────────────────────────────────────────
   build-and-test:
-    # GitHub-hosted runner – no server setup needed!
+    name: "🔨 Build & Test"
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Check out the source code
+      # ── Step 1: Checkout ──────────────────────────────────
       - name: Checkout source code
         uses: actions/checkout@v4
 
-      # 2. Set up Java 11 (Temurin distribution)
+      # ── Step 2: Set up Java ───────────────────────────────
       - name: Set up JDK 11
         uses: actions/setup-java@v4
         with:
           java-version: "11"
           distribution: "temurin"
-          # Cache Maven dependencies to speed up subsequent runs
           cache: maven
 
-      # 3. Compile the project
+      # ── Step 3: Compile ───────────────────────────────────
       - name: Compile
-        run: mvn compile
+        run: mvn compile --no-transfer-progress
 
-      # 4. Run all unit tests
+      # ── Step 4: Run Tests ─────────────────────────────────
       - name: Run unit tests
-        run: mvn test
+        run: mvn test --no-transfer-progress
 
-      # 5. Package the application into a JAR
+      # ── Step 5: Package ───────────────────────────────────
       - name: Package
-        run: mvn package -DskipTests
+        run: mvn package -DskipTests --no-transfer-progress
 
-      # 6. Upload the JAR as a build artifact so it can be
-      #    downloaded from the workflow run summary page.
+      # ── Step 6: Upload JAR ────────────────────────────────
       - name: Upload JAR artifact
         uses: actions/upload-artifact@v4
         with:
           name: app-jar
           path: target/*.jar
           retention-days: 7
+
+  # ─────────────────────────────────────────────────────────
+  # JOB 2 — SonarCloud Code Quality Analysis
+  # Purpose: Measure code quality, security, and coverage.
+  #          Runs AFTER build-and-test passes (needs:).
+  #
+  # WHAT SONARCLOUD CHECKS IN THIS PROJECT:
+  #   BankAccount.java
+  #     → Bug: withdraw() allows negative balance
+  #     → Code Smell: magic number in getAccountSummary()
+  #     → Coverage gap: zero/negative balance branches
+  #
+  #   UserValidator.java
+  #     → Security Hotspot: hardcoded password constant
+  #     → Bug: String == comparison instead of .equals()
+  #     → Bug: null input on isValidEmail() → NPE
+  #     → Coverage gap: maskPassword short-string branch
+  # ─────────────────────────────────────────────────────────
+  sonarcloud-analysis:
+    name: "📊 SonarCloud Analysis"
+    runs-on: ubuntu-latest
+    needs: build-and-test    # only run if build-and-test passes
+
+    steps:
+      # ── Step 1: Checkout (FULL history) ───────────────────
+      # fetch-depth: 0 fetches the complete git history.
+      # WHY: SonarCloud uses git blame to know which developer
+      #      introduced each issue and to compute "new code"
+      #      (issues introduced since last analysis).
+      #      Without full history, new-code detection breaks.
+      - name: Checkout source code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # ← CRITICAL for SonarCloud
+
+      # ── Step 2: Set up Java ───────────────────────────────
+      - name: Set up JDK 11
+        uses: actions/setup-java@v4
+        with:
+          java-version: "11"
+          distribution: "temurin"
+          cache: maven      # restores ~/.m2 from cache
+
+      # ── Step 3: Cache SonarCloud scanner ──────────────────
+      # SonarCloud downloads its analysis rules (~100 MB)
+      # the first time. Caching them saves ~60 seconds on
+      # every subsequent pipeline run.
+      - name: Cache SonarCloud scanner packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.sonar/cache
+          key: ${{ runner.os }}-sonar
+          restore-keys: ${{ runner.os }}-sonar
+
+      # ── Step 4: Compile ───────────────────────────────────
+      - name: Compile
+        run: mvn compile --no-transfer-progress
+
+      # ── Step 5: Test + Coverage + SonarCloud (combined) ───
+      # `mvn verify` runs:
+      #   1. compile
+      #   2. test          ← JUnit 5 runs all *Test.java files
+      #   3. JaCoCo report ← generates jacoco.xml from test run
+      #
+      # `sonar:sonar` runs immediately after and:
+      #   - Scans all .java source files for bugs/smells/CVEs
+      #   - Reads jacoco.xml to compute coverage per class
+      #   - Uploads everything to sonarcloud.io
+      #
+      # WHY combined into ONE mvn command?
+      # If you run `mvn verify` and `sonar:sonar` separately,
+      # Maven might clean the target/ folder between runs,
+      # losing the jacoco.exec file that sonar:sonar needs.
+      #
+      # SECRETS USED:
+      #   SONAR_TOKEN  → your SonarCloud token
+      #                  (GitHub → Settings → Secrets)
+      #   GITHUB_TOKEN → auto-provided by GitHub
+      #                  (used by Sonar to post PR comments)
+      - name: Run Tests, Generate Coverage & Analyze with SonarCloud
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mvn verify sonar:sonar \
+            --no-transfer-progress \
+            -Dsonar.organization=rasmikanta19 \
+            -Dsonar.projectKey=rasmikanta19_GitHubActions-JenkinsDemoProject \
+            -Dsonar.host.url=https://sonarcloud.io \
+            -Dsonar.token=${{ secrets.SONAR_TOKEN }}
+
+      # ── Step 6: Upload JaCoCo HTML Coverage Report ────────
+      # The HTML report shows GREEN (covered) and RED (missed)
+      # lines in every class — exactly what SonarCloud shows.
+      # Uploading it lets you inspect coverage without leaving GitHub.
+      - name: Upload JaCoCo HTML Coverage Report
+        uses: actions/upload-artifact@v4
+        if: always()    # upload even when tests fail
+        with:
+          name: jacoco-coverage-report
+          path: target/site/jacoco/
+          retention-days: 14
+
