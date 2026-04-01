@@ -143,5 +143,5 @@ class StringUtilsTest {
 
     @Test
     @DisplayName("Concat 2 Strings")
-    void testConcat2StringsSipi() {assertEquals("Subrina Biswal",stringUtils.concatStrings("Subrina"," Biswal"));}
+    void testConcat2StringsSipi() {assertEquals("Subrina Biswal",stringUtils.concatStrings("Subrina","Biswal"));}
 }

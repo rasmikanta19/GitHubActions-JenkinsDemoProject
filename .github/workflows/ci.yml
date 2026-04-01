@@ -11,7 +11,7 @@
 #     in the repository.
 # ============================================================
 
-name: CI Pipeline
+name: CI/CD Pipeline
 
 # Trigger the workflow on every push to any branch and on
 # every pull-request targeting the main branch.
