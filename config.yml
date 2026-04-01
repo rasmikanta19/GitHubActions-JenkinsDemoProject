@@ -1,0 +1,479 @@
+# ============================================================
+# ENTERPRISE-LEVEL GitHub Actions CI/CD Pipeline
+# ============================================================
+# Project  : GitHubActions-JenkinsDemoProject
+# Language : Java 11 + Maven
+# Covers   : Build → Test → Code Quality → Security →
+#            Docker → Deploy to Staging → Deploy to Prod
+# ============================================================
+
+
+# ──────────────────────────────────────────────────────────
+# SECTION 1: WORKFLOW NAME
+# ──────────────────────────────────────────────────────────
+# The display name shown in the GitHub Actions UI tab.
+# Keep it descriptive so the team can identify it at a glance.
+# ──────────────────────────────────────────────────────────
+name: Enterprise CI/CD Pipeline
+
+
+# ──────────────────────────────────────────────────────────
+# SECTION 2: TRIGGER EVENTS  (on:)
+# ──────────────────────────────────────────────────────────
+# Defines WHEN this workflow runs.
+# Enterprise pipelines usually trigger on:
+#   - push      → run CI on every branch (catch bugs early)
+#   - pull_request → gate merges with mandatory checks
+#   - release   → trigger a production deployment
+#   - schedule  → nightly full regression / security scans
+#   - workflow_dispatch → manual trigger with input params
+# ──────────────────────────────────────────────────────────
+on:
+
+  # Run CI on every push to any branch
+  push:
+    branches:
+      - "**"
+    # Only trigger if these paths changed (ignore docs-only changes)
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - ".github/ISSUE_TEMPLATE/**"
+
+  # Gate every PR that targets main or release branches
+  pull_request:
+    branches:
+      - main
+      - "release/**"
+
+  # Trigger a full production deployment when a GitHub Release is published
+  release:
+    types: [published]
+
+  # Nightly security + regression scan at 02:00 UTC
+  schedule:
+    - cron: "0 2 * * *"
+
+  # Allow a human to manually trigger the pipeline from the GitHub UI
+  # with custom inputs (e.g., choose environment or skip tests)
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment (staging / production)"
+        required: true
+        default: "staging"
+        type: choice
+        options:
+          - staging
+          - production
+      skip_tests:
+        description: "Skip unit tests? (emergency hotfix only)"
+        required: false
+        default: "false"
+        type: boolean
+
+
+# ──────────────────────────────────────────────────────────
+# SECTION 3: GLOBAL PERMISSIONS
+# ──────────────────────────────────────────────────────────
+# Principle of least-privilege: deny all by default,
+# then grant only what each job truly needs.
+# Individual jobs can override these with their own
+# `permissions:` block (see Deploy job below).
+# ──────────────────────────────────────────────────────────
+permissions:
+  contents: read        # read source code
+  packages: write       # push Docker image to GitHub Container Registry
+  security-events: write # upload SARIF results (CodeQL / Trivy)
+  checks: write         # write PR check results
+  pull-requests: write  # post comments on PRs (coverage report, etc.)
+
+
+# ──────────────────────────────────────────────────────────
+# SECTION 4: GLOBAL ENVIRONMENT VARIABLES
+# ──────────────────────────────────────────────────────────
+# Variables available to EVERY job and step in this workflow.
+# Secrets (passwords, tokens) are stored in
+# GitHub → Settings → Secrets and are referenced with
+# ${{ secrets.SECRET_NAME }} — they are NEVER exposed in logs.
+# ──────────────────────────────────────────────────────────
+env:
+  APP_NAME: github-actions-jenkins-demo
+  VERSION: "1.0.0"
+  JAVA_VERSION: "11"
+  MAVEN_OPTS: "-Xmx2g -XX:+TieredCompilation"   # JVM tuning for Maven
+  DOCKER_REGISTRY: ghcr.io                        # GitHub Container Registry
+  IMAGE_NAME: ghcr.io/${{ github.repository }}    # e.g. ghcr.io/org/repo
+  SONAR_HOST: https://sonarcloud.io               # SonarCloud endpoint
+
+
+# ──────────────────────────────────────────────────────────
+# SECTION 5: REUSABLE DEFAULTS
+# ──────────────────────────────────────────────────────────
+# Apply the same shell and working-directory to every `run:`
+# step automatically — avoids repeating it on each step.
+# ──────────────────────────────────────────────────────────
+defaults:
+  run:
+    shell: bash
+    working-directory: .   # root of the repo
+
+
+# ══════════════════════════════════════════════════════════
+# SECTION 6: JOBS
+# Each job runs on its own fresh runner (VM).
+# Jobs run IN PARALLEL by default; use `needs:` to
+# enforce ordering / create a dependency chain.
+# ══════════════════════════════════════════════════════════
+jobs:
+
+  # ────────────────────────────────────────────────────────
+  # JOB 1: BUILD & UNIT TEST
+  # Purpose : Compile the source and run fast unit tests.
+  #           This is the first gate — fail fast, fail cheap.
+  # ────────────────────────────────────────────────────────
+  build-and-test:
+    name: "🔨 Build & Unit Test"
+    runs-on: ubuntu-latest
+
+    # Strategy matrix: run the job against multiple Java
+    # versions simultaneously to guarantee compatibility.
+    strategy:
+      fail-fast: false        # don't cancel sibling matrix jobs on one failure
+      matrix:
+        java: ["11", "17"]    # test on Java 11 AND Java 17
+
+    # Job-level environment variables (override global if same name)
+    env:
+      JAVA_VERSION: ${{ matrix.java }}
+
+    steps:
+
+      # ── Step 1: Checkout ──────────────────────────────
+      # Clones the repository onto the runner.
+      # fetch-depth: 0  →  full history needed for SonarQube
+      #                     blame / new-code detection.
+      - name: Checkout source code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── Step 2: Set up JDK ───────────────────────────
+      # Installs the requested Java version.
+      # `cache: maven` stores ~/.m2 between runs →
+      # dramatically speeds up dependency downloads.
+      - name: Set up JDK ${{ matrix.java }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ matrix.java }}
+          distribution: temurin
+          cache: maven
+
+      # ── Step 3: Compile ──────────────────────────────
+      - name: Compile
+        run: mvn compile --no-transfer-progress
+
+      # ── Step 4: Unit Tests ───────────────────────────
+      # --no-transfer-progress silences download noise.
+      # Results land in target/surefire-reports/*.xml
+      - name: Run unit tests
+        if: ${{ github.event.inputs.skip_tests != 'true' }}
+        run: mvn test --no-transfer-progress
+
+      # ── Step 5: Publish Test Report ──────────────────
+      # Parses JUnit XML and shows pass/fail inline in the
+      # PR Checks tab — no external service needed.
+      - name: Publish JUnit test results
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        if: always()   # run even when tests fail
+        with:
+          files: "**/target/surefire-reports/*.xml"
+
+      # ── Step 6: Package ──────────────────────────────
+      - name: Package JAR
+        run: mvn package -DskipTests --no-transfer-progress
+
+      # ── Step 7: Upload JAR as artifact ───────────────
+      # Makes the JAR downloadable from the workflow run
+      # summary page and available to downstream jobs via
+      # actions/download-artifact.
+      - name: Upload JAR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-jar-java${{ matrix.java }}
+          path: target/*.jar
+          retention-days: 30
+
+
+  # ────────────────────────────────────────────────────────
+  # JOB 2: CODE QUALITY (SonarCloud)
+  # Purpose : Static analysis — bugs, code smells, coverage.
+  # Runs    : Only after build-and-test passes (needs:)
+  # ────────────────────────────────────────────────────────
+  code-quality:
+    name: "📊 Code Quality (SonarCloud)"
+    runs-on: ubuntu-latest
+    needs: build-and-test   # wait for Job 1 to succeed
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: temurin
+          cache: maven
+
+      # Run tests WITH coverage (JaCoCo) then send to Sonar.
+      # SONAR_TOKEN is a secret created in GitHub → Settings → Secrets.
+      - name: Analyze with SonarCloud
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          mvn verify sonar:sonar \
+            --no-transfer-progress \
+            -Dsonar.projectKey=${{ github.repository_owner }}_${{ env.APP_NAME }} \
+            -Dsonar.organization=${{ github.repository_owner }} \
+            -Dsonar.host.url=${{ env.SONAR_HOST }} \
+            -Dsonar.login=${{ secrets.SONAR_TOKEN }}
+
+
+  # ────────────────────────────────────────────────────────
+  # JOB 3: SECURITY SCAN (Trivy)
+  # Purpose : Scan the source code and dependencies for
+  #           known CVEs; upload results to GitHub Security.
+  # Runs    : In parallel with code-quality (no `needs:`)
+  # ────────────────────────────────────────────────────────
+  security-scan:
+    name: "🔒 Security Scan (Trivy)"
+    runs-on: ubuntu-latest
+    needs: build-and-test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Trivy scans for CVEs in Maven dependencies and
+      # uploads a SARIF report to the GitHub Security tab.
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs                 # filesystem scan (catches pom.xml deps)
+          scan-ref: .
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH       # only fail on high/critical CVEs
+          exit-code: "1"               # fail the job if CVEs are found
+
+      - name: Upload Trivy SARIF to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+
+
+  # ────────────────────────────────────────────────────────
+  # JOB 4: DOCKER BUILD & PUSH
+  # Purpose : Build a Docker image, scan it, push to GHCR.
+  # Runs    : After build-and-test passes.
+  # Only on : push to main OR a release event.
+  # ────────────────────────────────────────────────────────
+  docker:
+    name: "🐳 Docker Build & Push"
+    runs-on: ubuntu-latest
+    needs: [build-and-test, code-quality, security-scan]
+
+    # Condition: only build Docker image on main branch push or release
+    if: |
+      github.ref == 'refs/heads/main' ||
+      github.event_name == 'release'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Download the JAR built in Job 1 (Java 11 variant)
+      - name: Download JAR artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: app-jar-java11
+          path: target/
+
+      # Docker Buildx enables multi-platform builds
+      # (linux/amd64 + linux/arm64 for Apple Silicon support).
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Authenticate with GitHub Container Registry (GHCR).
+      # GITHUB_TOKEN is automatically provided by GitHub — no secret needed.
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.DOCKER_REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Generate Docker tags automatically:
+      #   - latest (on main)
+      #   - semver tags (on release: v1.0.0, v1.0, v1)
+      #   - short SHA (always, for traceability)
+      - name: Extract Docker metadata (tags & labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=sha,prefix=sha-
+
+      # Build and push the multi-platform image.
+      # Layer cache is stored in GitHub Actions Cache for speed.
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+
+  # ────────────────────────────────────────────────────────
+  # JOB 5: DEPLOY TO STAGING
+  # Purpose : Deploy the Docker image to the staging env.
+  # Runs    : After docker job succeeds.
+  # Uses    : GitHub Environments for approvals & secrets.
+  # ────────────────────────────────────────────────────────
+  deploy-staging:
+    name: "🚀 Deploy → Staging"
+    runs-on: ubuntu-latest
+    needs: docker
+
+    # GitHub Environment named "staging":
+    #   - Stores staging-specific secrets (K8S_CONFIG, etc.)
+    #   - Can require reviewers before proceeding
+    #   - Shows deployment status on the repo's Deployments page
+    environment:
+      name: staging
+      url: https://staging.example.com   # shown as a link in the UI
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Set up kubectl to talk to your Kubernetes cluster.
+      # K8S_CONFIG is a base64-encoded kubeconfig stored as a secret
+      # in the "staging" GitHub Environment.
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: "latest"
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.K8S_CONFIG }}" | base64 -d > ~/.kube/config
+
+      # Update the image tag in the Kubernetes deployment.
+      # The image tag uses the short SHA for full traceability.
+      - name: Deploy to Staging cluster
+        run: |
+          kubectl set image deployment/${{ env.APP_NAME }} \
+            app=${{ env.IMAGE_NAME }}:sha-${{ github.sha }} \
+            --namespace=staging
+          kubectl rollout status deployment/${{ env.APP_NAME }} \
+            --namespace=staging \
+            --timeout=120s
+
+      # Post a comment on the PR with the staging URL
+      - name: Comment deployment URL on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '✅ Deployed to **staging**: https://staging.example.com'
+            })
+
+
+  # ────────────────────────────────────────────────────────
+  # JOB 6: DEPLOY TO PRODUCTION
+  # Purpose : Deploy to production on a GitHub Release event.
+  # Runs    : After staging deploy succeeds.
+  # Gate    : Requires manual approval (configured in the
+  #           "production" GitHub Environment settings).
+  # ────────────────────────────────────────────────────────
+  deploy-production:
+    name: "🏭 Deploy → Production"
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+
+    # Only deploy to production on a published GitHub Release
+    if: github.event_name == 'release'
+
+    # GitHub Environment named "production":
+    #   - Requires 1 reviewer to approve before this job starts
+    #   - Has its own isolated secrets
+    environment:
+      name: production
+      url: https://app.example.com
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.K8S_CONFIG }}" | base64 -d > ~/.kube/config
+
+      - name: Deploy to Production cluster
+        run: |
+          kubectl set image deployment/${{ env.APP_NAME }} \
+            app=${{ env.IMAGE_NAME }}:${{ github.ref_name }} \
+            --namespace=production
+          kubectl rollout status deployment/${{ env.APP_NAME }} \
+            --namespace=production \
+            --timeout=300s
+
+      # Tag the Docker image as "stable" after successful prod deploy
+      - name: Tag image as stable
+        run: |
+          docker pull ${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+          docker tag  ${{ env.IMAGE_NAME }}:${{ github.ref_name }} \
+                      ${{ env.IMAGE_NAME }}:stable
+          docker push ${{ env.IMAGE_NAME }}:stable
+
+
+  # ────────────────────────────────────────────────────────
+  # JOB 7: NOTIFICATIONS
+  # Purpose : Notify the team on Slack about build outcome.
+  # Runs    : Always — even if earlier jobs failed.
+  # ────────────────────────────────────────────────────────
+  notify:
+    name: "📣 Notify Team"
+    runs-on: ubuntu-latest
+    needs: [build-and-test, code-quality, security-scan, docker]
+    if: always()   # run regardless of upstream job results
+
+    steps:
+      - name: Send Slack notification
+        uses: slackapi/slack-github-action@v1
+        with:
+          channel-id: "C123ABC456"    # your Slack channel ID
+          slack-message: |
+            *${{ env.APP_NAME }}* pipeline finished
+            Status : ${{ job.status }}
+            Branch : ${{ github.ref_name }}
+            Commit : ${{ github.sha }}
+            Actor  : ${{ github.actor }}
+            Run    : ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}

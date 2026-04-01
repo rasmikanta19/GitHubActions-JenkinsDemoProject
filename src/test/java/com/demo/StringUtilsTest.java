@@ -141,6 +141,8 @@ class StringUtilsTest {
     @DisplayName("Concat 2 Strings")
     void testConcat2Strings() {assertEquals("JaiJagannath",stringUtils.concatStrings("Jai","Jagannath"));}
 
+
+    //checking for Sonar
     @Test
     @DisplayName("Concat 2 Strings")
     void testConcat2StringsSipi() {assertEquals("SubrinaBiswal",stringUtils.concatStrings("Subrina","Biswal"));}
